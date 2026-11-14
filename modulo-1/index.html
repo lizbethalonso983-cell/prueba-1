@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Módulo M1 - Precalentador HE-006</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', Arial, sans-serif; max-width: 950px; margin: 20px auto; padding: 0 15px; color: #222; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .card { background: #f8f9fa; padding: 18px; border-radius: 8px; border: 1px solid #dee2e6; }
+    .control { margin-bottom: 14px; }
+    label { display: block; font-weight: 600; margin-bottom: 4px; font-size: 0.95em; }
+    input[type="range"] { width: 100%; cursor: pointer; }
+    .resultados p { font-size: 1em; margin: 8px 0; }
+    .valor { font-weight: bold; color: #0056b3; }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.9em; }
+    th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: center; }
+    th { background-color: #e9ecef; }
+  </style>
+</head>
+<body>
+
+  <h2>Módulo M1: Precalentador de Alimentación (HE-006)</h2>
+  <p>Modelo de intercambiador de coraza y tubos en contracorriente (<strong>Método &epsilon;-NTU</strong>).</p>
+
+  <div class="grid">
+    <!-- Panel de Entradas (Ajustables con Sliders) -->
+    <div class="card">
+      <h3>Entradas del Proceso</h3>
+      
+      <div class="control">
+        <label>Flujo de Alimentación F (kmol/h): <span id="val_F" class="valor">100.0</span></label>
+        <input type="range" id="slider_F" min="50" max="150" step="5" value="100">
+      </div>
+
+      <div class="control">
+        <label>Fracción molar Benceno (z): <span id="val_z" class="valor">0.50</span></label>
+        <input type="range" id="slider_z" min="0.10" max="0.90" step="0.05" value="0.50">
+      </div>
+
+      <div class="control">
+        <label>Temperatura inicial T0 (°C): <span id="val_T0" class="valor">25.0</span></label>
+        <input type="range" id="slider_T0" min="15" max="60" step="1" value="25">
+      </div>
+
+      <div class="control">
+        <label>Temp. Fondos Calientes (°C): <span id="val_Tf" class="valor">110.39</span></label>
+        <input type="range" id="slider_Tf" min="80" max="140" step="0.5" value="110.39">
+      </div>
+
+      <button onclick="restaurarCasoBase()" style="padding: 8px 12px; cursor: pointer; background: #0056b3; color: white; border: none; border-radius: 4px;">
+        Restaurar Caso Base (DWSIM)
+      </button>
+    </div>
+
+    <!-- Panel de Salidas (Entregables a M2) -->
+    <div class="card resultados">
+      <h3>Salidas de M1 (hacia M2)</h3>
+      <p>Temp. Alimentación Precalentada: <span id="out_Talim" class="valor">--</span> °C</p>
+      <p>Temp. Fondos Enfriados: <span id="out_Tfondos" class="valor">--</span> °C</p>
+      <p>Calor Intercambiado (Q): <span id="out_Q" class="valor">--</span> kW</p>
+      <p>Efectividad térmica (&epsilon;): <span id="out_eff" class="valor">--</span> %</p>
+      <canvas id="graficaTemp" height="150"></canvas>
+    </div>
+  </div>
+
+  <!-- Tabla de Validación contra DWSIM -->
+  <div class="card" style="margin-top: 20px;">
+    <h3>Validación del Caso Base vs. DWSIM</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Variable</th>
+          <th>Valor DWSIM (Caso Base)</th>
+          <th>Simulador Web M1</th>
+          <th>Error Relativo</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>T Alimentación Precalentada (°C)</td>
+          <td>40.32</td>
+          <td id="val_web_Ta">--</td>
+          <td id="err_Ta">--</td>
+        </tr>
+        <tr>
+          <td>T Fondos Enfriados (°C)</td>
+          <td>83.32</td>
+          <td id="val_web_Tf">--</td>
+          <td id="err_Tf">--</td>
+        </tr>
+        <tr>
+          <td>Calor Intercambiado Q (kW)</td>
+          <td>64.02</td>
+          <td id="val_web_Q">--</td>
+          <td id="err_Q">--</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    // =========================================================================
+    // 1. PARÁMETROS EXACTOS EXTRAÍDOS DE DWSIM (HE-006)
+    // =========================================================================
+    const U_DWSIM = 1000.0;        // W / (m²·K)
+    const A_DWSIM = 1.0;           // m²
+    const F_FONDOS_KMOL_H = 45.0;  // Flujo molar de fondos [kmol/h]
+
+    // Capacidades caloríficas molares medias calibradas a condiciones de operación [J / (mol·K)]
+    const Cp_BENCENO = 143.5;
+    const Cp_TOLUENO = 157.3;
+    const Cp_FONDOS_HOT = 189.2;   // Tolueno líquido a ~95-110 °C
+
+    // =========================================================================
+    // 2. FUNCIÓN MATEMÁTICA DE M1 (EXPORTABLE AL HUB DE LA PLANTA VIRTUAL)
+    // =========================================================================
+    function simularM1(F_kmol_h, z_benceno, T0_C, T_fondos_in_C, F_fondos = F_FONDOS_KMOL_H) {
+      // Conversión de kmol/h a mol/s
+      const n_fria = (F_kmol_h * 1000) / 3600;
+      const n_caliente = (F_fondos * 1000) / 3600;
+
+      // Cp molar de la mezcla de alimentación [J / (mol·K)]
+      const Cp_alim = z_benceno * Cp_BENCENO + (1 - z_benceno) * Cp_TOLUENO;
+
+      // Tasas de capacidad calorífica C [W/K]
+      const C_fria = n_fria * Cp_alim;
+      const C_caliente = n_caliente * Cp_FONDOS_HOT;
+
+      const C_min = Math.min(C_fria, C_caliente);
+      const C_max = Math.max(C_fria, C_caliente);
+      const Cr = C_min / C_max;
+
+      // NTU y Efectividad para flujo en contracorriente
+      const NTU = (U_DWSIM * A_DWSIM) / C_min;
+      let efectividad = 0;
+      if (Cr < 0.999) {
+        efectividad = (1 - Math.exp(-NTU * (1 - Cr))) / (1 - Cr * Math.exp(-NTU * (1 - Cr)));
+      } else {
+        efectividad = NTU / (1 + NTU);
+      }
+
+      // Calor transferido [W]
+      const Q_max = C_min * (T_fondos_in_C - T0_C);
+      const Q_real_W = efectividad * Q_max;
+
+      // Temperaturas de salida [°C]
+      const T_alim_out = T0_C + (Q_real_W / C_fria);
+      const T_fondos_out = T_fondos_in_C - (Q_real_W / C_caliente);
+
+      return {
+        T_alim_precalentada: T_alim_out,
+        T_fondos_enfriados: T_fondos_out,
+        Q_kW: Q_real_W / 1000,
+        efectividad_pct: efectividad * 100
+      };
+    }
+
+    // =========================================================================
+    // 3. ACTUALIZACIÓN DE GRÁFICA Y TABLA DE VALIDACIÓN
+    // =========================================================================
+    const ctx = document.getElementById('graficaTemp').getContext('2d');
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: ['Extremo Frío (z = 0)', 'Extremo Caliente (z = L)'],
+        datasets: [
+          { label: 'Fondos Calientes (Lado Coraza)', data: [83.32, 110.39], borderColor: '#d9534f', backgroundColor: '#d9534f', tension: 0.1 },
+          { label: 'Alimentación (Lado Tubos)', data: [25.0, 40.32], borderColor: '#0275d8', backgroundColor: '#0275d8', tension: 0.1 }
+        ]
+      },
+      options: { responsive: true, scales: { y: { title: { display: true, text: 'Temperatura (°C)' } } } }
+    });
+
+    function actualizarSimulacion() {
+      const F = parseFloat(document.getElementById('slider_F').value);
+      const z = parseFloat(document.getElementById('slider_z').value);
+      const T0 = parseFloat(document.getElementById('slider_T0').value);
+      const Tf = parseFloat(document.getElementById('slider_Tf').value);
+
+      document.getElementById('val_F').textContent = F.toFixed(1);
+      document.getElementById('val_z').textContent = z.toFixed(2);
+      document.getElementById('val_T0').textContent = T0.toFixed(1);
+      document.getElementById('val_Tf').textContent = Tf.toFixed(2);
+
+      const res = simularM1(F, z, T0, Tf);
+
+      document.getElementById('out_Talim').textContent = res.T_alim_precalentada.toFixed(2);
+      document.getElementById('out_Tfondos').textContent = res.T_fondos_enfriados.toFixed(2);
+      document.getElementById('out_Q').textContent = res.Q_kW.toFixed(2);
+      document.getElementById('out_eff').textContent = res.efectividad_pct.toFixed(2);
+
+      // Actualizar tabla de validación
+      document.getElementById('val_web_Ta').textContent = res.T_alim_precalentada.toFixed(2);
+      document.getElementById('val_web_Tf').textContent = res.T_fondos_enfriados.toFixed(2);
+      document.getElementById('val_web_Q').textContent = res.Q_kW.toFixed(2);
+
+      document.getElementById('err_Ta').textContent = (Math.abs(res.T_alim_precalentada - 40.32) / 40.32 * 100).toFixed(2) + '%';
+      document.getElementById('err_Tf').textContent = (Math.abs(res.T_fondos_enfriados - 83.32) / 83.32 * 100).toFixed(2) + '%';
+      document.getElementById('err_Q').textContent = (Math.abs(res.Q_kW - 64.02) / 64.02 * 100).toFixed(2) + '%';
+
+      chart.data.datasets[0].data = [res.T_fondos_enfriados, Tf];
+      chart.data.datasets[1].data = [T0, res.T_alim_precalentada];
+      chart.update();
+    }
+
+    function restaurarCasoBase() {
+      document.getElementById('slider_F').value = 100;
+      document.getElementById('slider_z').value = 0.50;
+      document.getElementById('slider_T0').value = 25;
+      document.getElementById('slider_Tf').value = 110.39;
+      actualizarSimulacion();
+    }
+
+    ['slider_F', 'slider_z', 'slider_T0', 'slider_Tf'].forEach(id => {
+      document.getElementById(id).addEventListener('input', actualizarSimulacion);
+    });
+
+    actualizarSimulacion();
+  </script>
+</body>
+</html>
